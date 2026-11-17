@@ -26,6 +26,43 @@ def normalle(metin):
     return re.sub(r"\s+", " ", m)
 
 
+def kelime_deseni(kelime):
+    """Kelimenin bir kelime başında geçmesini arayan desen. Harften rakama ya da
+    rakamdan harfe geçiş de kelime başı sayılır: 'iphone' ve '16', 'iphone16' içinde
+    bulunur; 'ram' ise 'program' içinde bulunmaz."""
+    k = normalle(kelime)
+    if not k:
+        return None
+    if k[0].isdigit():
+        once = r"(?<!\d)"
+    elif re.match(r"[^\W\d_]", k[0]):
+        once = r"(?<![^\W\d_])"     # önünde harf olmasın
+    else:
+        once = ""                     # '+', '#' gibi işaretle başlıyorsa sınır aranmaz
+    return re.compile(once + re.escape(k))
+
+
+def kelime_gecer(kelime, normal_metin):
+    d = kelime_deseni(kelime)
+    return bool(d and d.search(normal_metin))
+
+
+def kural_gruplari(metin):
+    """'/kelime' argümanlarını virgüllerden kurallara böler. Rakamlar arasındaki virgül
+    (ör. '<1.299,90') bölmez. Her grup: (kelimeler, en_cok metni | None)."""
+    gruplar = []
+    for parca in re.split(r"(?<!\d),|,(?!\d)", metin):
+        kelimeler, en_cok = [], None
+        for p in parca.split():
+            if p.startswith("<"):
+                en_cok = p[1:]
+            else:
+                kelimeler.append(p)
+        if kelimeler or en_cok:
+            gruplar.append((kelimeler, en_cok))
+    return gruplar
+
+
 def json_oku(dosya, varsayilan):
     try:
         return json.loads(Path(dosya).read_text(encoding="utf-8"))
@@ -66,7 +103,7 @@ class GrupDinleyici:
             if f and f >= 10:
                 fiyatlar.append(f)
         for kural in self.ayarlar["kurallar"]:
-            if not all(normalle(k) in n for k in kural["kelimeler"]):
+            if not all(kelime_gecer(k, n) for k in kural["kelimeler"]):
                 continue
             if kural.get("en_cok") and fiyatlar and min(fiyatlar) > kural["en_cok"]:
                 continue
@@ -77,7 +114,9 @@ class GrupDinleyici:
     def kural_metni(kural):
         s = " + ".join(kural["kelimeler"])
         if kural.get("en_cok"):
-            s += f" (en çok {kural['en_cok']:,.0f} TL)".replace(",", ".")
+            f = kural["en_cok"]
+            ham = f"{f:,.0f}" if float(f).is_integer() else f"{f:,.2f}"
+            s += f" (en çok {ham.replace(',', '#').replace('.', ',').replace('#', '.')} TL)"
         return s
 
     # ------------------------------------------------------------ çalışma
@@ -273,19 +312,34 @@ class GrupDinleyici:
             self.kaydet()
             return f"🗑 Dinleme bırakıldı: {html.escape(g['ad'])}"
         if k == "/kelime" and len(parca) >= 2:
-            kelimeler, en_cok = [], None
-            for p in parca[1:]:
-                if p.startswith("<"):
-                    en_cok = self.fiyat_coz(p[1:])
-                else:
-                    kelimeler.append(p)
-            if not kelimeler:
-                return "En az bir kelime yazın. Örnek: <code>/kelime iphone depo</code>"
-            kural = {"kelimeler": kelimeler, "en_cok": en_cok}
-            self.ayarlar["kurallar"].append(kural)
-            self.kaydet()
-            return (f"🔔 Alarm kuralı eklendi: <b>{html.escape(self.kural_metni(kural))}</b>\n"
-                    "Dinlenen gruplarda bu kelimelerin hepsini içeren bir mesaj gelince sesli uyarı alırsınız.")
+            ornek = ("Örnek: <code>/kelime iphone depo</code>\n"
+                     "Birden çok kural için virgülle ayırın: <code>/kelime ssd, iphone 16, ddr5</code>")
+            gruplar = kural_gruplari(" ".join(parca[1:]))
+            if not gruplar or any(not kel for kel, _ in gruplar):
+                return "Her kuralda en az bir kelime olmalı.\n" + ornek
+            eklenen, zaten = [], []
+            for kelimeler, en_cok in gruplar:
+                kural = {"kelimeler": kelimeler, "en_cok": self.fiyat_coz(en_cok) if en_cok else None}
+                anahtar = ([normalle(x) for x in kural["kelimeler"]], kural["en_cok"])
+                if any(([normalle(x) for x in v["kelimeler"]], v.get("en_cok")) == anahtar
+                       for v in self.ayarlar["kurallar"] + eklenen):
+                    zaten.append(kural)
+                    continue
+                eklenen.append(kural)
+            self.ayarlar["kurallar"] += eklenen
+            if eklenen:
+                self.kaydet()
+            satirlar = []
+            if eklenen:
+                satirlar.append(("🔔 Alarm kuralı eklendi" if len(eklenen) == 1 else
+                                 f"🔔 {len(eklenen)} alarm kuralı eklendi") + ":")
+                satirlar += [f"• <b>{html.escape(self.kural_metni(x))}</b>" for x in eklenen]
+            if zaten:
+                satirlar.append("Zaten vardı: " + ", ".join(html.escape(self.kural_metni(x)) for x in zaten))
+            if eklenen:
+                satirlar.append("Dinlenen gruplarda bir kuralın kelimelerinin hepsi kelime başında "
+                                "geçen bir mesaj gelince sesli uyarı alırsınız.")
+            return "\n".join(satirlar)
         if k == "/kelimesil" and len(parca) >= 2 and parca[1].isdigit():
             no = int(parca[1])
             if not 1 <= no <= len(self.ayarlar["kurallar"]):
@@ -301,5 +355,5 @@ YARDIM = ("<b>Grup dinleme</b>\n"
           "/gruplar [ara] – Telegram gruplarınızı listele\n"
           "/grupekle &lt;no&gt; – listedeki grubu dinlemeye al\n"
           "/grupsil &lt;no&gt; – grubu dinlemekten çıkar\n"
-          "/kelime &lt;kelimeler&gt; [&lt;fiyat] – alarm kuralı ekle\n"
+          "/kelime &lt;kelimeler&gt; [&lt;fiyat], … – alarm kuralı ekle (virgül = ayrı kural)\n"
           "/kelimesil &lt;no&gt; – kuralı sil")

@@ -93,7 +93,9 @@ Kurulum:
 2. Uygulamanın Yapılandırma sekmesinde `telegram_api_id`, `telegram_api_hash` ve `telegram_telefon` (ör. `+905551234567`) alanlarını doldurun. Hesabınızda iki adımlı doğrulama varsa şifresini `telegram_2fa_sifre` alanına yazın. Kaydedip uygulamayı yeniden başlatın.
 3. Telegram size bir giriş kodu gönderir; bot da sizden kodu ister. Kodu **rakamların arasına tire koyarak** bota yazın: `/kod 1-2-3-4-5`. (Tiresiz yazılan kodu Telegram güvenlik gereği geçersiz sayar.)
 4. `/gruplar` ile gruplarınızı listeleyin, `/grupekle 3` ile dinlenecekleri seçin.
-5. `/kelime iphone depo` ile alarm kuralı ekleyin. Mesajda kelimelerin hepsi geçmelidir. Fiyat sınırı da koyabilirsiniz: `/kelime iphone 16 pro <50000` (mesajdaki en düşük fiyat 50.000 TL'yi aşarsa alarm çalmaz; mesajda fiyat yoksa yine çalar).
+5. `/kelime iphone depo` ile alarm kuralı ekleyin. Boşlukla ayrılan kelimelerin hepsi mesajda geçmelidir. Virgülle ayırarak tek seferde birden çok kural ekleyebilirsiniz: `/kelime ssd, iphone 16, ddr5` üç ayrı kural oluşturur (biri tutsa yeter). Fiyat sınırı da koyabilirsiniz: `/kelime iphone 16 pro <50000` (mesajdaki en düşük fiyat 50.000 TL'yi aşarsa alarm çalmaz; mesajda fiyat yoksa yine çalar). Fiyat sınırı yalnızca yazıldığı kurala uygulanır: `/kelime ssd <3000, iphone 16 <50000`.
+
+   Kelimeler **kelime başında** aranır: `ram`, "program" içinde eşleşmez ama "RAM'li" ve "ramfiyat" içinde eşleşir; `iphone`, "iPhone16" içinde eşleşir. Harften rakama geçiş de kelime başı sayılır, bu yüzden `16` da "iPhone16" içinde bulunur. Büyük/küçük harf ve i/ı/İ/I farkı önemsenmez.
 
 | Komut | Ne yapar |
 |---|---|

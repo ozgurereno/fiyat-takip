@@ -101,6 +101,46 @@ assert g.eslesen_kural("Samsung depo fırsatı") is None
 assert "iphone + 16 + pro (en çok 50.000 TL)" in g.komut("/dinleme", ["/dinleme"])
 assert "Kural silindi" in g.komut("/kelimesil", ["/kelimesil", "2"]) and len(g.ayarlar["kurallar"]) == 1
 assert grup.json_oku(tmp / "gruplar.json", {})["kurallar"] == [{"kelimeler": ["iphone", "depo"], "en_cok": None}]
+# virgülle ayrılan gruplar ayrı kurallar, boşlukla ayrılanlar birlikte geçmeli
+g3 = grup.GrupDinleyici(t, tmp / "gruplar3.json", tmp / "oturum3.txt", takip.fiyat_coz)
+c = g3.komut("/kelime", "/kelime ssd, iphone 16, ddr5".split()); print(c)
+assert "3 alarm kuralı eklendi" in c and "<b>ssd</b>" in c and "<b>iphone + 16</b>" in c and "<b>ddr5</b>" in c
+assert [k["kelimeler"] for k in g3.ayarlar["kurallar"]] == [["ssd"], ["iphone", "16"], ["ddr5"]]
+assert grup.json_oku(tmp / "gruplar3.json", {})["kurallar"][1] == {"kelimeler": ["iphone", "16"], "en_cok": None}
+assert g3.eslesen_kural("Kingston SSD 1TB 2.199 TL")["kelimeler"] == ["ssd"]
+assert g3.eslesen_kural("Corsair DDR5 32GB kit")["kelimeler"] == ["ddr5"]
+assert g3.eslesen_kural("iPhone 16 128GB 52.999 TL")["kelimeler"] == ["iphone", "16"]
+assert g3.eslesen_kural("iPhone 15 Pro fırsatı") is None                    # '16' yok
+assert g3.eslesen_kural("16 GB bellek, iPad değil") is None                  # 'iphone' yok
+# virgül çevresindeki boşluklar önemsiz, boş gruplar atlanır, aynı kural iki kez eklenmez
+c = g3.komut("/kelime", "/kelime ssd,ram ,  , DDR5".split()); print(c)
+assert "Alarm kuralı eklendi" in c and "<b>ram</b>" in c and "Zaten vardı: ssd, DDR5" in c
+assert len(g3.ayarlar["kurallar"]) == 4
+assert "Zaten vardı" in g3.komut("/kelime", ["/kelime", "SSD"]) and len(g3.ayarlar["kurallar"]) == 4
+# fiyat sınırı yalnızca kendi grubuna; rakamlar arasındaki virgül bölmez
+g4 = grup.GrupDinleyici(t, tmp / "gruplar4.json", tmp / "oturum4.txt", takip.fiyat_coz)
+c = g4.komut("/kelime", "/kelime ssd <1.299,90, iphone 16 pro <50.000, monitör".split()); print(c)
+assert "<b>ssd (en çok 1.299,90 TL)</b>" in c and "<b>iphone + 16 + pro (en çok 50.000 TL)</b>" in c
+assert [(k["kelimeler"], k["en_cok"]) for k in g4.ayarlar["kurallar"]] == \
+    [(["ssd"], 1299.9), (["iphone", "16", "pro"], 50000), (["monitör"], None)]
+assert g4.eslesen_kural("SSD 1.499 TL") is None and g4.eslesen_kural("SSD 1.199 TL")["en_cok"] == 1299.9
+assert g4.eslesen_kural("Monitör 9.999 TL")["kelimeler"] == ["monitör"]
+assert "en az bir kelime" in g4.komut("/kelime", "/kelime ssd, <5000".split()) and len(g4.ayarlar["kurallar"]) == 3
+assert "en az bir kelime" in g4.komut("/kelime", ["/kelime", ","])
+# kelime başı eşleşmesi
+G = grup.kelime_gecer; n = grup.normalle
+assert not G("ram", n("Yeni program indirimde")) and not G("ram", n("Kuruluş: Hiram"))
+assert G("ram", n("16GB RAM'li dizüstü")) and G("ram", n("RAM fiyatları")) and G("ram", n("ramfiyat"))
+assert G("iphone", n("iPhone16 Pro Max")) and G("iphone", n("Apple-iPhone")) and G("iphone", n("#iPhone"))
+assert not G("phone", n("iPhone 16"))
+assert G("16", n("iPhone16 Pro")) and G("16", n("16GB")) and not G("16", n("2016 model")) and not G("16", n("116 TL"))
+assert G("ddr5", n("DDR5-6000")) and not G("ddr5", n("xddr5"))
+assert G("ısı", n("ISITICI")) and G("İphone", n("iphone"))                    # Türkçe harfler
+assert G("s24+", n("Galaxy S24+ fırsat")) and G("+", n("a+b"))
+g3.ayarlar["kurallar"] = [{"kelimeler": ["ram", "16"], "en_cok": None}]
+assert g3.eslesen_kural("Program 16 gün ücretsiz") is None
+assert g3.eslesen_kural("Corsair 16GB RAM 1.999 TL") is not None
+
 # alarm + tekrar engeli
 msj.clear(); ha.clear()
 kural = g.ayarlar["kurallar"][0]
