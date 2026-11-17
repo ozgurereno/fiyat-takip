@@ -1,0 +1,13 @@
+# gizli ve çalışma zamanı dosyaları – depoya girmez
+fiyat_takip/ayarlar.json
+fiyat_takip/options.json
+fiyat_takip/durum.json
+fiyat_takip/gecmis.json
+fiyat_takip/izlemeler.json
+fiyat_takip/gruplar.json
+fiyat_takip/cerezler.json
+fiyat_takip/telegram_oturum.txt
+fiyat_takip/hata_*.html
+*.tmp
+__pycache__/
+.DS_Store

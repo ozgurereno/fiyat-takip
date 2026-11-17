@@ -1,0 +1,36 @@
+name: "Amazon Fiyat Takip"
+description: "amazon.com.tr ürün fiyatlarını izler, fiyat düşünce Telegram'dan bildirir"
+version: "1.7.0"
+slug: "fiyat_takip"
+init: false
+arch:
+  - aarch64
+  - amd64
+startup: application
+boot: auto
+homeassistant_api: true
+map:
+  - type: share
+    read_only: false
+options:
+  telegram_token: ""
+  kontrol_araligi_sn: 180
+  arama_araligi_sn: 600
+  min_dusus_tl: 0
+  artis_bildir: false
+  hata_esigi: 5
+  gunluk_ozet: "09:00"
+schema:
+  telegram_token: str
+  telegram_chat_id: "str?"
+  kontrol_araligi_sn: int
+  arama_araligi_sn: "int?"
+  min_dusus_tl: float
+  artis_bildir: bool
+  hata_esigi: int
+  gunluk_ozet: "str?"
+  alarm_cihazi: "str?"
+  telegram_api_id: "int?"
+  telegram_api_hash: "password?"
+  telegram_telefon: "str?"
+  telegram_2fa_sifre: "password?"
