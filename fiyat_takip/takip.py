@@ -27,7 +27,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit
 import requests
 from bs4 import BeautifulSoup
 
-from grup import YARDIM as GRUP_YARDIM, GrupDinleyici
+from grup import YARDIM as GRUP_YARDIM, GrupDinleyici, kelime_gecer, normalle
 
 KLASOR = Path(__file__).resolve().parent
 # Home Assistant uygulaması olarak çalışırken ayarlar arayüzden gelir (/data/options.json)
@@ -66,6 +66,11 @@ HA_TOKEN = os.environ.get("SUPERVISOR_TOKEN", "")
 
 ASIN_RE = re.compile(r"/(?:dp|gp/product|gp/aw/d|product)/([A-Z0-9]{10})(?=[/?#]|$)")
 log = logging.getLogger("takip")
+AOD_URL = "https://www.amazon.com.tr/gp/product/ajax/aodAjaxMain/ref=auto_load_aod?asin={}&pc=dp"
+DEPO_PANEL_SINIRI = 8   # bir Depo taramasında en çok kaç ürünün teklif paneli okunsun
+ERTELE = object()        # panel gerekli ama bu tur okunamadı / hak bitti: sonraki tura bırak
+PANEL_TAZE = timedelta(hours=24)       # kart fiyatı değişmedikçe panel bilgisi bu kadar geçerli
+PANEL_HATA_BEKLE = timedelta(hours=1)  # okunamayan panel bu kadar sonra yeniden denenir
 
 
 class Engellendi(Exception):
@@ -194,6 +199,8 @@ def arama_adi(url):
         son = urlsplit(url).path.rstrip("/").split("/")[-1].removesuffix(".html")
         return "MediaMarkt · " + re.sub(r"-\d+$", "", son).replace("-", " ")
     q = dict(parse_qsl(urlsplit(url).query))
+    if depo_mu(url):
+        return "Amazon Depo" + (" · " + q["k"] if q.get("k") else "")
     if q.get("k"):
         return q["k"]
     for m in re.finditer(r"p_(?:4|89|123):([^,|]+)", q.get("rh", "")):   # marka süzgeci
@@ -202,8 +209,49 @@ def arama_adi(url):
     return "Arama"
 
 
-def arama_coz(sayfa):
-    """Arama sonuç sayfası -> ([{'asin','baslik','fiyat'}], sonraki sayfa adresi | None)"""
+def kelime_listesi(metin):
+    """'apple,iphone 16, ssd' -> ['apple', 'iphone 16', 'ssd']"""
+    return [k for k in (re.sub(r"\s+", " ", x).strip() for x in (metin or "").split(",")) if k]
+
+
+def kelime_uyar(kelimeler, baslik):
+    """Başlıkta kelimelerden herhangi biri kelime başında geçiyor mu (boşluklu ögede hepsi)?
+    Süzgeç yoksa True."""
+    if not kelimeler:
+        return True
+    n = normalle(baslik)
+    return any(all(kelime_gecer(w, n) for w in k.split()) for k in kelimeler)
+
+
+def depo_mu(url):
+    """Amazon Depo (warehouse-deals) arama/kategori linki mi?"""
+    return site_bul(url) == "amazon" and dict(parse_qsl(urlsplit(url).query)).get("i") == "warehouse-deals"
+
+
+def depo_url(asin):
+    """Ürün sayfası, ikinci el teklifleri paneli açık olarak."""
+    return f"https://www.amazon.com.tr/dp/{asin}?aod=1&condition=used"
+
+
+def depo_kart_fiyati(kart):
+    """Depo arama kartındaki 'Diğer satın alma seçenekleri 1.234,56 TL (2 adet İkinci El ürün)'
+    satırından (en düşük ikinci el fiyatı, teklif sayısı) döndürür."""
+    blok = kart.select_one('[data-cy="secondary-offer-recipe"]')
+    if not blok:
+        return None, 0
+    el = blok.select_one(".a-color-base")
+    metin = blok.get_text(" ", strip=True)
+    fiyat = fiyat_coz(el.get_text(strip=True)) if el else None
+    if not fiyat:
+        m = re.search(r"([\d.,]+)\s*TL", metin)
+        fiyat = fiyat_coz(m.group(1)) if m else None
+    m = re.search(r"\((\d+)\s*(?:adet\s*)?İkinci El", metin, re.I)
+    return fiyat, int(m.group(1)) if m else 1
+
+
+def arama_coz(sayfa, depo=False):
+    """Arama sonuç sayfası -> ([{'asin','baslik','fiyat'}], sonraki sayfa adresi | None).
+    depo=True: Amazon Depo kartlarında sıfır fiyat yoktur; en düşük ikinci el teklifi okunur."""
     soup = BeautifulSoup(sayfa, "html.parser")
     urunler = []
     for kart in soup.select('div[data-component-type="s-search-result"][data-asin]'):
@@ -215,11 +263,62 @@ def arama_coz(sayfa):
             t = h.get_text(" ", strip=True)
             if t and t not in parcalar:
                 parcalar.append(t)
-        fiyat = asil_fiyat(kart)
+        if depo:
+            fiyat, adet = depo_kart_fiyati(kart)
+        else:
+            fiyat = asil_fiyat(kart)
         if parcalar and fiyat:
-            urunler.append({"asin": asin, "baslik": " ".join(parcalar), "fiyat": fiyat})
+            u = {"asin": asin, "baslik": " ".join(parcalar), "fiyat": fiyat}
+            if depo:
+                u["url"] = depo_url(asin)
+                u["not"] = f"{adet} ikinci el teklif" if adet > 1 else ""
+            urunler.append(u)
     sonraki = soup.select_one("a.s-pagination-next[href]")
     return urunler, (urljoin("https://www.amazon.com.tr", sonraki["href"]) if sonraki else None)
+
+
+DURUM_SIRASI = {"kabul edilebilir": 1, "iyi": 2, "çok iyi": 3, "yeni gibi": 4, "yeni": 5}
+DURUM_SECENEK = {"yenigibi": "yeni gibi", "çokiyi": "çok iyi", "cokiyi": "çok iyi", "iyi": "iyi"}
+
+
+def durum_derecesi(durum):
+    """'İkinci El - Çok İyi' -> 3, 'Yeni' -> 5, bilinmiyorsa 0."""
+    d = (durum or "").replace("İ", "i").lower().split(" - ")[-1].strip()
+    return DURUM_SIRASI.get(d, 0)
+
+
+def aod_coz(sayfa):
+    """Amazon 'tüm teklifler' paneli (/gp/product/ajax/aodAjaxMain) -> teklif listesi:
+    [{'durum','fiyat','satici','gonderen','yorum','onceki'}]. Sabit (üstteki) teklif ilk sıradadır."""
+    soup = BeautifulSoup(sayfa, "html.parser")
+    def yazi(el):
+        return re.sub(r"\s+", " ", el.get_text(" ", strip=True)) if el else ""
+    teklifler = []
+    for o in soup.select("#aod-pinned-offer, #aod-offer"):
+        fiyat = asil_fiyat(o)
+        if not fiyat:
+            continue
+        cizili = o.select_one('.a-price[data-a-strike="true"]')
+        yorum = o.select_one("#aod-condition-container")
+        teklifler.append({
+            "durum": yazi(o.select_one("#aod-offer-heading")),
+            "fiyat": fiyat,
+            "satici": re.sub(r"^Satıcı\s*", "", yazi(o.select_one("#aod-offer-soldBy"))),
+            "gonderen": re.sub(r"^Gönderen\s*", "", yazi(o.select_one("#aod-offer-shipsFrom"))),
+            "yorum": re.sub(r"^Durum\s*", "", yazi(yorum)),
+            "onceki": a_price_coz(cizili) if cizili else None,
+        })
+    return teklifler
+
+
+def depo_ozet(teklifler):
+    """Panel tekliflerinden Depo teklifi, sıfır fiyatı ve önceki fiyatı çıkarır."""
+    ikinci = [t for t in teklifler if durum_derecesi(t["durum"]) < 5 and t["durum"]]
+    depo = [t for t in ikinci if "amazon depo" in t["satici"].lower()]
+    yeni = [t for t in teklifler if durum_derecesi(t["durum"]) == 5]
+    return {"depo": min(depo or ikinci, key=lambda t: t["fiyat"], default=None),
+            "yeni": min((t["fiyat"] for t in yeni), default=None),
+            "onceki": next((t["onceki"] for t in teklifler if t.get("onceki")), None)}
 
 
 def vatan_coz(sayfa):
@@ -501,7 +600,13 @@ def sayfa_coz(sayfa):
     baslik = soup.select_one("#productTitle")
     if not baslik:
         raise ValueError("ürün sayfası tanınmadı (başlık bulunamadı)")
-    fiyat = fiyat_bul(soup)
+    yeni_satir = soup.select_one("#apex_desktop_newAccordionRow")
+    if soup.select_one("#usedOnlyBuybox") and not soup.select_one("#newAccordionRow_0, #qualifiedBuybox"):
+        fiyat = None   # yalnızca ikinci el (ör. Amazon Depo) teklifi var; sıfır satılmıyor
+    elif yeni_satir and asil_fiyat(yeni_satir):
+        fiyat = asil_fiyat(yeni_satir)   # sıfır ve ikinci el seçenekleri birlikte: sıfırınki
+    else:
+        fiyat = fiyat_bul(soup)
     stok_metni = " ".join(el.get_text(" ", strip=True).lower()
                           for el in soup.select("#availability, #outOfStock"))
     if soup.select_one("#outOfStock") or "mevcut değil" in stok_metni or "stokta yok" in stok_metni:
@@ -525,6 +630,8 @@ class Takip:
         self.oturum = self.yeni_oturum()
         self.engel = False
         self.carpan = 1
+        self.panel_hakki = 0
+        self.panel_engel = False
 
     # -- dosyalar
     def ayar_yukle(self):
@@ -801,10 +908,10 @@ class Takip:
         site = site_bul(iz["url"])
         if site in ("vatan", "mediamarkt"):
             return self._sayfali_tara(iz, site)
-        url, hepsi = iz["url"], {}
+        url, hepsi, depo = iz["url"], {}, depo_mu(iz["url"])
         for no in range(int(iz.get("sayfa") or self.ayar["arama_sayfa_siniri"])):
             sayfa = self.getir(url)
-            urunler, url = arama_coz(sayfa)
+            urunler, url = arama_coz(sayfa, depo=depo)
             if no == 0 and not urunler and not (iz.get("yeni") and arama_bos_mu(sayfa)):
                 HATA_KLASOR.mkdir(parents=True, exist_ok=True)
                 (HATA_KLASOR / "hata_arama.html").write_text(sayfa, encoding="utf-8")
@@ -830,16 +937,121 @@ class Takip:
         return self.bildir(f"<b>{html.escape(baslik)}</b> · {html.escape(iz['ad'])}\n"
                            f'<a href="{url}">{html.escape(kisalt(urun_adi))}</a>\n{detay}{ek}')
 
+    def depo_bilgi(self, asin):
+        """Ürünün teklif panelini okuyup depo_ozet döndürür; hak bittiyse ya da okunamazsa None."""
+        if self.panel_hakki <= 0:
+            return None
+        self.panel_hakki -= 1
+        time.sleep(random.uniform(2, 4))
+        try:
+            return depo_ozet(aod_coz(self.getir(AOD_URL.format(asin))))
+        except Engellendi:
+            self.panel_hakki = 0
+            self.panel_engel = True
+            self.engel = True   # Amazon geri çekilmesi devreye girsin
+            log.warning("Depo teklif paneli: site engeli, bu tur başka panel okunmayacak")
+        except Exception as e:
+            log.warning("Depo teklif paneli okunamadı (%s): %s", asin, e)
+        return None
+
+    def depo_panel(self, u, g, taze=False):
+        """Ürünün panel bilgisini döndürür: önbellekteki (kart fiyatı aynı ve 24 saatten yeni)
+        ya da yeni okunan. Okunamazsa ya da bu turun hakkı bittiyse None. taze=True önbelleği atlar."""
+        simdi = datetime.now()
+        p = g.get("panel")
+        if (p and not taze and abs(p["kart"] - u["fiyat"]) < 0.005
+                and simdi - datetime.fromisoformat(p["zaman"]) < PANEL_TAZE):
+            return p
+        if g.get("panel_bekle") and simdi < datetime.fromisoformat(g["panel_bekle"]):
+            return None   # az önce okunamadı
+        if self.panel_hakki <= 0:
+            return None
+        self.panel_engel = False
+        b = self.depo_bilgi(u["asin"])
+        if b is None:
+            if not self.panel_engel:   # site engeli değil, bu ürüne özel bir sorun
+                g["panel_bekle"] = (simdi + PANEL_HATA_BEKLE).isoformat(timespec="seconds")
+            return None
+        g.pop("panel_bekle", None)
+        g["panel"] = {**b, "kart": u["fiyat"], "zaman": simdi.isoformat(timespec="seconds")}
+        return g["panel"]
+
+    @staticmethod
+    def depo_metin(u, p, not_=""):
+        """Depo bildiriminin ayrıntısı (HTML): fiyat, durum, satıcı, sıfır/önceki fiyat kıyası."""
+        t = p["depo"]
+        satirlar = [f"Fiyat: <b>{tl(t['fiyat'])}</b>{not_}", " · ".join(x for x in (
+            html.escape(t["durum"]), t["satici"] and f"Satıcı: {html.escape(t['satici'])}",
+            u["fiyat"] < t["fiyat"] - 0.005 and f"listede en düşük ikinci el {tl(u['fiyat'])}") if x)]
+        kiyas = []
+        if p["yeni"]:
+            kiyas.append(f"Sıfırı {tl(p['yeni'])}" + (f" (%{(p['yeni'] - t['fiyat']) / p['yeni'] * 100:.0f} daha ucuz)"
+                                                     if p["yeni"] > t["fiyat"] else ""))
+        if p["onceki"] and p["onceki"] > t["fiyat"]:
+            kiyas.append(f"Önceki fiyat {tl(p['onceki'])} (%{(p['onceki'] - t['fiyat']) / p['onceki'] * 100:.0f} altında)")
+        if kiyas:
+            satirlar.append(" · ".join(kiyas))
+        if t["yorum"]:
+            satirlar.append(f"<i>{html.escape(kisalt(t['yorum'], 200))}</i>")
+        return "\n".join(satirlar)
+
+    @staticmethod
+    def durum_uyar(iz, p):
+        return not iz.get("durum") or durum_derecesi(p["depo"]["durum"]) >= DURUM_SIRASI[iz["durum"]]
+
+    def depo_degerlendir(self, iz, u, g, yeni_cikti, not_, url):
+        """Depo izlemesinde bir ürün. Dönüş: True = işlendi, ERTELE = sonraki tura kalsın.
+        Eşik ya da durum süzgeci varken panel okunmadan bildirim yapılmaz."""
+        zorunlu = bool(iz.get("esik") or iz.get("durum"))
+        if iz.get("yeni") and yeni_cikti:
+            p = self.depo_panel(u, g, taze=True)
+            if not (p and p["depo"]):
+                if zorunlu:
+                    return ERTELE
+                self.arama_bildir(iz, "🆕 Yeni çıktı", u["baslik"],
+                                  f"Fiyat: <b>{tl(u['fiyat'])}</b>{not_}\n<i>Durum bilgisi alınamadı.</i>", url)
+                return True
+            if not self.durum_uyar(iz, p):
+                log.info("%s: %s, süzgeç '%s' altında, bildirilmedi", u["asin"], p["depo"]["durum"], iz["durum"])
+                return True
+            if self.arama_bildir(iz, "🆕 Yeni çıktı", u["baslik"], self.depo_metin(u, p, not_), url):
+                g["bildirilen"] = p["depo"]["fiyat"]
+            return True
+        if not iz.get("esik"):
+            return True
+        p = self.depo_panel(u, g)
+        if not (p and p["depo"]):
+            return ERTELE
+        fiyat = p["depo"]["fiyat"]
+        ref, ref_ad = (p["yeni"], "Sıfırından") if p["yeni"] else (p["onceki"], "Önceki fiyatından")
+        if not ref:
+            return True   # kıyaslanacak fiyat yok: bildirilmez
+        oran = (ref - fiyat) / ref * 100
+        if oran < iz["esik"] or not self.durum_uyar(iz, p):
+            g.pop("bildirilen", None)
+            return True
+        if not g.get("bildirilen") or fiyat < g["bildirilen"] - 0.005:
+            if self.arama_bildir(iz, f"🔥 {ref_ad} %{oran:.0f} ucuz", u["baslik"], self.depo_metin(u, p, not_), url):
+                g["bildirilen"] = fiyat
+        return True
+
     def arama_degerlendir(self, iz, d, urunler):
         """Yeni çıkan ürünleri ve olağan fiyatına göre eşiği aşan düşüşleri bildirir."""
         simdi = datetime.now()
         sinir = (simdi - timedelta(days=int(self.ayar["gecmis_gun"]))).strftime("%Y-%m-%d")
         ilk = "gorulen" not in d
         gorulen = d.setdefault("gorulen", {})
+        depo = depo_mu(iz["url"])
+        self.panel_hakki = DEPO_PANEL_SINIRI
         for u in urunler:
+            if not kelime_uyar(iz.get("kelimeler"), u["baslik"]):
+                # süzgece uymayan ürün yalnızca 'görüldü' sayılır: süzgeç değişince eskiler 'yeni' görünmesin
+                gorulen[u["asin"]] = simdi.isoformat(timespec="seconds")
+                continue
             url = u.get("url") or f"https://www.amazon.com.tr/dp/{u['asin']}"
             not_ = f" ({html.escape(u['not'], quote=False)})" if u.get("not") else ""
-            g = self.gecmis.setdefault(u["asin"], {"gunluk": {}})
+            # Depo fiyatları ikinci el fiyatıdır; sıfır fiyat geçmişine karışmasın
+            g = self.gecmis.setdefault(("depo:" if depo else "") + u["asin"], {"gunluk": {}})
             g["baslik"], fiyat, gun = u["baslik"], u["fiyat"], g["gunluk"]
             olagan = olagan_fiyat(gun, fiyat, self.ayar["gecmis_gun"])
             oran = (olagan - fiyat) / olagan * 100
@@ -847,6 +1059,13 @@ class Takip:
             son = gorulen.get(u["asin"])
             yeni_cikti = not ilk and (not son or simdi - datetime.fromisoformat(son) > timedelta(hours=6))
             gorulen[u["asin"]] = simdi.isoformat(timespec="seconds")
+            if depo:
+                if self.depo_degerlendir(iz, u, g, yeni_cikti, not_, url) is ERTELE and iz.get("yeni") and yeni_cikti:
+                    if son:   # sonraki turda yine 'yeni' sayılsın
+                        gorulen[u["asin"]] = son
+                    else:
+                        gorulen.pop(u["asin"], None)
+                continue
             if iz.get("yeni") and yeni_cikti:
                 if self.arama_bildir(iz, "🆕 Yeni çıktı", u["baslik"], f"Fiyat: <b>{tl(fiyat)}</b>{not_}", url):
                     g["bildirilen"] = fiyat
@@ -888,6 +1107,7 @@ class Takip:
         if d.get("hata_bildirildi"):
             self.bildir(f"✅ {etiket}\nTekrar okunabiliyor.")
         d.update(hata_sayisi=0, hata_bildirildi=False, adet=len(urunler),
+                 uyan=sum(kelime_uyar(iz.get("kelimeler"), u["baslik"]) for u in urunler),
                  en_ucuz=min((u["fiyat"] for u in urunler), default=0),
                  en_pahali=max((u["fiyat"] for u in urunler), default=0))
         log.info("arama '%s': %d ürün", iz["ad"], len(urunler))
@@ -918,7 +1138,13 @@ class Takip:
             d = self.durum["izleme"].get(iz["url"], {})
             durum = ("⚠️ okunamıyor" if d.get("hata_sayisi")
                      else f"{d['adet']} ürün" if "adet" in d else "henüz taranmadı")
-            kurallar = []
+            if iz.get("kelimeler") and "uyan" in d and not d.get("hata_sayisi"):
+                durum += f" ({d['uyan']} uyan)"
+            kurallar = ["📦 Depo"] if depo_mu(iz["url"]) else []
+            if iz.get("kelimeler"):
+                kurallar.append("kelime: " + html.escape(", ".join(iz["kelimeler"])))
+            if iz.get("durum"):
+                kurallar.append(f"en az {iz['durum'].title()}")
             if iz.get("yeni"):
                 kurallar.append("yeni çıkanı bildir")
             if iz.get("esik"):
@@ -993,13 +1219,14 @@ class Takip:
         if k == "/izle" and len(parca) >= 2:
             url = arama_url_temizle(parca[1])
             if not url:
-                return ("Bu link desteklenmiyor. Amazon.com.tr arama linki, Vatan Bilgisayar ya da "
+                return ("Bu link desteklenmiyor. Amazon.com.tr arama (Amazon Depo dahil) linki, Vatan Bilgisayar ya da "
                         "MediaMarkt kategori/arama linki gönderin (süzgeçleri seçtikten sonra "
                         "adres çubuğundaki link).")
             izler = self.izlemeler()
             if any(i["url"] == url for i in izler):
                 return "Bu arama zaten izleniyor."
-            esik, yeni, alarm, ad, aralik, sayfa_sayisi = None, False, False, [], None, None
+            esik, yeni, alarm, ad, aralik, sayfa_sayisi, durum = None, False, False, [], None, None, None
+            kelimeler = None
             for p in parca[2:]:
                 m = re.fullmatch(r"(\d+)\s*(dk|dakika|sn|saniye)", p.lower())
                 ms = re.fullmatch(r"(\d+)\s*sayfa", p.lower())
@@ -1015,12 +1242,25 @@ class Takip:
                     yeni = True
                 elif p.lower() == "alarm":
                     alarm = True
+                elif p.lower().startswith("kelime="):
+                    kelimeler = kelime_listesi(p[len("kelime="):])
+                    if not kelimeler:
+                        return "Örnek: <code>/izle &lt;link&gt; kelime=apple,iphone,ssd</code>"
+                elif p.lower().replace("ç", "c") in ("yenigibi", "cokiyi", "iyi"):
+                    durum = DURUM_SECENEK[p.lower().replace("ç", "c")]
                 elif re.fullmatch(r"%?\d+([.,]\d+)?%?", p):
                     esik = fiyat_coz(p.strip("%"))
                 else:
                     ad.append(p)
+            depo = depo_mu(url)
+            if durum and not depo:
+                return ("<code>yenigibi</code>, <code>cokiyi</code> ve <code>iyi</code> seçenekleri yalnızca "
+                        "Amazon Depo linklerinde geçerli.")
             if esik is None and not yeni:
-                esik = 50
+                if depo:
+                    yeni = True   # Depo'da stok gelip gider; varsayılan: yeni çıkanı bildir
+                else:
+                    esik = 50
             if esik is not None and not 1 <= esik < 100:
                 return "Yüzde 1 ile 99 arasında olmalı. Örnek: /izle &lt;link&gt; 50"
             iz = {"url": url, "ad": " ".join(ad) or arama_adi(url), "esik": esik,
@@ -1029,6 +1269,10 @@ class Takip:
                 iz["aralik"] = aralik
             if sayfa_sayisi:
                 iz["sayfa"] = sayfa_sayisi
+            if durum:
+                iz["durum"] = durum
+            if kelimeler:
+                iz["kelimeler"] = kelimeler
             adet = self.izleme_calistir(iz)
             if adet is None:
                 self.durum["izleme"].pop(url, None)
@@ -1038,16 +1282,52 @@ class Takip:
             d = self.durum["izleme"][url]
             bulunan = (f"{adet} ürün bulundu ({tl(d['en_ucuz'])} – {tl(d['en_pahali'])}), kaydedildi."
                        if adet else "Şu an listede ürün yok.")
+            if kelimeler:
+                bulunan += (f" Kelime süzgeci ({html.escape(', '.join(kelimeler))}): "
+                            f"{d['uyan']} ürün uyuyor; yalnızca adında bu kelimelerden biri geçenler değerlendirilir.")
             kurallar = []
             if yeni:
                 kurallar.append("listeye yeni bir ürün girince")
-            if esik:
+            if esik and depo:
+                kurallar.append(f"Depo fiyatı sıfır fiyatından (sıfırı yoksa önceki fiyatından) "
+                                f"%{esik:g} ve üzeri ucuz olunca")
+            elif esik:
                 kurallar.append(f"bir ürün olağan fiyatına göre %{esik:g} ve üzeri düşünce")
+            if depo:
+                bulunan += (" Amazon Depo kipi: fiyatlar ikinci el (Depo) fiyatıdır; bildirimde ürünün "
+                            "durumu, satıcısı ve sıfır fiyatı da yazar.")
+                if durum:
+                    bulunan += f" Yalnızca durumu en az “{durum.title()}” olanlar bildirilir."
             sure = iz.get("aralik") or self.ayar["arama_araligi_sn"]
             bulunan += f" Yaklaşık {sure // 60} dakikada bir taranacak."
             return (f"👀 İzlemeye alındı: <b>{html.escape(iz['ad'])}</b>\n{bulunan}\n"
                     f"{' ya da '.join(kurallar).capitalize()} haber veririm"
                     + (" (🚨 sesli uyarıyla)." if alarm else "."))
+        if k == "/izlekelime":
+            ornek = ("Örnek: <code>/izlekelime 2 apple, iphone, ssd</code> · kaldırmak için "
+                     "<code>/izlekelime 2 sil</code>")
+            if len(parca) < 2 or not parca[1].isdigit():
+                return ornek
+            izler = self.izlemeler()
+            no = int(parca[1])
+            if not 1 <= no <= len(izler):
+                return "Bu numarada izleme yok. Numaralar için /izlemeler"
+            iz = izler[no - 1]
+            metin = " ".join(parca[2:]).strip()
+            if not metin:
+                simdiki = ", ".join(iz.get("kelimeler") or []) or "yok"
+                return f"{html.escape(iz['ad'])} kelime süzgeci: {html.escape(simdiki)}\n{ornek}"
+            if metin.lower() in ("sil", "kaldır", "yok", "-"):
+                iz.pop("kelimeler", None)
+                json_yaz(IZLEME_DOSYA, izler)
+                return f"Kelime süzgeci kaldırıldı: {html.escape(iz['ad'])} (tüm ürünler değerlendirilir)"
+            kelimeler = kelime_listesi(re.sub(r"^kelime=", "", metin, flags=re.I))
+            if not kelimeler:
+                return ornek
+            iz["kelimeler"] = kelimeler
+            json_yaz(IZLEME_DOSYA, izler)
+            return (f"🔤 {html.escape(iz['ad'])}: yalnızca adında şu kelimelerden biri geçen ürünler "
+                    f"değerlendirilir: <b>{html.escape(', '.join(kelimeler))}</b>")
         if k == "/izlesil" and len(parca) >= 2 and parca[1].isdigit():
             izler = self.izlemeler()
             no = int(parca[1])
@@ -1137,6 +1417,9 @@ class Takip:
                 "/alarmtest – sesli uyarıyı dene\n\n"
                 "<b>Arama izleme</b> (indirim avı)\n"
                 "/izle &lt;link&gt; [yüzde] [yeni] [alarm] [5dk] [20sayfa] – Amazon, Vatan ya da MediaMarkt listesi izle\n"
+                "   Amazon Depo linkinde ek seçenek: [yenigibi|cokiyi|iyi] – en az bu durumdakileri bildir\n"
+                "   kelime=apple,iphone: yalnızca adında bu kelimelerden biri geçen ürünler\n"
+                "/izlekelime &lt;no&gt; &lt;kelimeler&gt; – izlemenin kelime süzgecini değiştir (sil: kaldır)\n"
                 "   yüzde: olağan fiyatına göre bu kadar düşeni bildir (varsayılan %50)\n"
                 "   yeni: listeye yeni giren ürünü bildir · alarm: sesli uyarı · 5dk: tarama aralığı · "
                 "20sayfa: okunacak sayfa sayısı\n"

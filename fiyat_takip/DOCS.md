@@ -39,6 +39,8 @@ Bir-iki dakika içinde Telegram'a, üç ürünün adını ve güncel fiyatını 
 | `/hedef 2 1500` | 2 numaralı ürüne hedef koyar (`/hedef 2` kaldırır) |
 | `/fiyat 4 2.999,00` | Fiyatı kendiliğinden bulunamayan bir sitede, sayfada gördüğünüz fiyatı yazarak yerini öğretir |
 
+Amazon ürünlerinde takip edilen fiyat **sıfır (yeni) satış fiyatıdır**. Bir ürün Amazon'da yalnızca ikinci el (ör. Amazon Depo) olarak satılıyorsa listede "stokta yok" görünür; sıfırı tekrar satışa çıkınca 📦 bildirimi gelir. İkinci el fiyatlarını izlemek için aşağıdaki **Amazon Depo izleme**yi kullanın.
+
 ### Başka sitelerden ürün takibi
 
 Amazon dışındaki bir sitenin ürün sayfasını da `/ekle <link>` ile ekleyebilirsiniz. Uygulama önce sitelerin arama motorları için sayfaya koyduğu standart ürün bilgisinden (schema.org / JSON-LD, ürün meta etiketleri) adı, fiyatı ve stok durumunu okur; Türkiye'deki e-ticaret altyapılarının çoğu bu bilgiyi verir. Bulamazsa bot sizden fiyatı ister: sayfada gördüğünüz fiyatı `/fiyat <no> <fiyat>` ile yazdığınızda uygulama o fiyatın sayfadaki yerini öğrenir ve sonraki okumalarda oradan okur. Fiyat yalnızca tarayıcıda çalışan kodla oluşuyorsa (sayfa kaynağında yoksa) o site izlenemez.
@@ -69,17 +71,32 @@ MediaMarkt'ta yalnızca MediaMarkt'ın sattığı ürünler için linkte `?marke
 | `/izle <arama linki> 40` | Aynısı, eşik %40 |
 | `/izlemeler` | İzlenen aramalar |
 | `/izlesil 1` | 1 numaralı izlemeyi kaldırır |
+| `/izlekelime 1 apple, iphone, ssd` | 1 numaralı izlemenin kelime süzgecini değiştirir (`/izlekelime 1 sil` kaldırır, `/izlekelime 1` gösterir) |
 
 Ek seçenekler (linkten sonra, istediğiniz sırayla):
 
-- bir sayı (ör. `30`): olağan fiyatına göre bu oranda düşen ürünü bildirir (hiçbir seçenek yazmazsanız %50)
+- bir sayı (ör. `30`): olağan fiyatına göre bu oranda düşen ürünü bildirir (hiçbir seçenek yazmazsanız %50). Amazon Depo'da anlamı farklıdır, aşağıya bakın.
 - `yeni`: listeye yeni giren ürünü bildirir; Amazon Depo gibi stoğu gelip giden listeler için
+- `yenigibi` / `cokiyi` / `iyi`: yalnızca Amazon Depo linklerinde; en az bu durumdaki ürünleri bildirir (aşağıya bakın)
 - `alarm`: bildirimler sesli (kritik) uyarıyla gelir
+- `kelime=apple,iphone,ram,ssd`: yalnızca adında bu kelimelerden **herhangi biri** geçen ürünler değerlendirilir; diğerlerine hiç bakılmaz (Depo'da panelleri de okunmaz). Kelimeler grup alarmlarındaki gibi kelime başında aranır (`ram`, "program" içinde eşleşmez; `iphone`, "iPhone16" içinde eşleşir), büyük/küçük harf ve i/ı farkı önemsenmez. Virgülden sonra boşluk bırakmayın; boşluklu ifade (ör. "iphone 16", iki kelimenin de geçmesi gerekir) için sonradan `/izlekelime` kullanın. Süzgeci değiştirdiğinizde, daha önce listede görülmüş ürünler "yeni" sayılmaz.
 - `20sayfa` gibi bir sayı: bu izlemede okunacak en fazla sayfa sayısı (1–30). Her sayfa bir istek demektir.
 - `5dk` gibi bir süre: bu izlemenin tarama aralığı (en az 1 dakika; yazmazsanız `arama_araligi_sn` ayarı geçerlidir). Site engel gösterirse uygulama yalnızca o izlemenin aralığını geçici olarak açar.
 - sonuna yazdığınız diğer kelimeler izlemenin adı olur
 
 Örnekler: `/izle <depo linki> yeni alarm 3dk Depo iPhone` · `/izle <vatan ssd linki> 30 10dk`. Yeni-ürün izlemesinde, 6 saatten uzun süre listede görünmeyen bir ürünün geri dönmesi de "yeni" sayılır.
+
+### Amazon Depo izleme
+
+Amazon Depo (ikinci el / iade) listesinin linkini `/izle` ile gönderin; uygulama bunu kendiliğinden tanır. Örnek: Amazon'da **Amazon Depo** bölümünü açıp "En yeni" sıralamasını seçin ve adres çubuğundaki linki gönderin (`…/s?i=warehouse-deals&…&s=date-desc-rank`). Süzgeç ya da arama kelimesi eklediyseniz onlar da korunur.
+
+- Depo arama kartlarında sıfır fiyat yoktur; kartta görünen "Diğer satın alma seçenekleri … TL" ürünün **en düşük ikinci el fiyatıdır** ve izleme bu fiyatla yapılır. Bu fiyatlar normal ürün takibinin fiyat geçmişine karışmaz.
+- Hiçbir seçenek yazmazsanız Depo izlemesi **yeni çıkan ürünü** bildirir (normal aramalardaki %50 varsayılanı yerine).
+- **Yüzde eşiği sıfır fiyatına göredir:** `/izle <depo linki> 30`, ürünün Amazon Depo fiyatı sıfır (yeni) fiyatından en az %30 düşükse bildirir. Ürünün sıfırı satılmıyorsa Amazon'un "Önceki Fiyat"ı (liste fiyatı) esas alınır; ikisi de yoksa ürün bildirilmez. Aynı ürün, fiyatı daha da düşmedikçe yeniden bildirilmez.
+- Sıfır fiyatı, durum ve satıcı ürünün **teklif panelinden** okunur (sayfadaki "(1 İkinci El ürün)" linkinin açtığı panel). Bildirime şunlar eklenir: durumu (ör. "İkinci El - Yeni Gibi"), satıcısı (Amazon Depo ya da başka bir satıcı), sıfır fiyatı ve ne kadar ucuz olduğu, "Önceki Fiyat" ve durum açıklaması. Mesajdaki link ürün sayfasını ikinci el teklifleri açık olarak getirir.
+- Durum süzgeci: `yenigibi`, `cokiyi` ya da `iyi` yazarsanız yalnızca en az o durumdaki ürünler bildirilir. Örnek: `/izle <depo linki> 30 yenigibi alarm 3dk`.
+- İstek sayısını düşük tutmak için bir taramada en çok 8 panel okunur. Okunan panel bilgisi ürün başına saklanır ve kartta görünen fiyat değişmedikçe 24 saat yeniden okunmaz; yeni çıkan ürünün paneli her zaman yeniden okunur. Kalabalık listelerde `kelime=` süzgeciyle istek sayısını iyice azaltabilirsiniz.
+- Eşik ya da durum süzgeci varsa panel okunmadan bildirim yapılmaz: 8 sınırını aşan ürünler bir sonraki taramaya kalır, paneli okunamayan ürün bir saat sonra yeniden denenir. Yalnızca `yeni` seçeneği varken (eşik ve durum süzgeci yokken) panel okunamayan ürün beklemeden, "Durum bilgisi alınamadı" notuyla bildirilir.
 
 "Olağan fiyat", uygulamanın o ürün için son 30 günde kaydettiği günlük fiyatların ortancasıdır; Amazon'un üstü çizili etiket fiyatı kullanılmaz. Uygulama geçmişi izlemeye aldığınız andan itibaren biriktirir.
 

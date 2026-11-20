@@ -80,5 +80,20 @@ t.oturum.get = lambda url, timeout=0, params=None, headers=None: R("<html>bakım
 assert t.izleme_calistir(iz) is None and (tmp / "hata_vatan.html").exists()
 assert "en az 1 dakika" in t.komut(f"/izle {U}&x=1 30sn")
 assert "desteklenmiyor" in t.komut("/izle https://www.hepsiburada.com/ssd-c-123")
+# kelime süzgeci Depo dışındaki izlemelerde de çalışır
+t.oturum.get = get; msj.clear()
+U2 = "https://www.vatanbilgisayar.com/ssd/"
+sayfalar.clear(); sayfalar[1] = sayfa([kart("a", "Samsung 990 Pro 2TB", "10.000"), kart("k", "Kingston NV3 1TB", "3.000"),
+                                       kart("s", "Sandisk Extreme Program SSD", "4.000")], toplam=1)
+c = t.komut(f"/izle {U2} 30 kelime=samsung,ram"); print(c)
+assert "Kelime süzgeci (samsung, ram): 1 ürün uyuyor" in c          # 'ram' 'Program' içinde eşleşmez
+iz2 = [i for i in t.izlemeler() if i["url"] == U2][0]; assert iz2["kelimeler"] == ["samsung", "ram"]
+assert "vatan:k.html" not in t.gecmis and "vatan:a.html" in t.gecmis
+for g in t.gecmis.values(): g["gunluk"] = {(datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"): list(g["gunluk"].values())[0]}
+sayfalar[1] = sayfa([kart("a", "Samsung 990 Pro 2TB", "6.000"), kart("k", "Kingston NV3 1TB", "1.000"),
+                     kart("s", "Sandisk Extreme Program SSD", "1.000")], toplam=1)
+t.izleme_calistir(iz2)
+assert len(msj) == 1 and "Samsung 990 Pro" in msj[0] and "%40 indirim" in msj[0], msj
+assert "kelime: samsung, ram" in t.komut("/izlemeler") and "(1 uyan)" in t.komut("/izlemeler")
 shutil.rmtree(tmp)
 print("VATAN TESTLERİ GEÇTİ")
