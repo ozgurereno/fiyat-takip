@@ -218,6 +218,56 @@ assert ha and ha[-1][2] == "https://www.amazon.com.tr/dp/B0GIZLI" and "https://t
 asyncio.run_coroutine_threadsafe(isle(Olay(5, "iphone depo")), g2.loop).result(3)          # dinlenmeyen sohbet
 asyncio.run_coroutine_threadsafe(isle(Olay(-1002, "Samsung depo")), g2.loop).result(3)     # kurala uymuyor
 assert len(ha) == 1
+# kısaltıcı / fırsat sitesi linki düz Amazon linkine çevrilir (ağa çıkmadan, sahte yönlendirmelerle)
+class Yanit:
+    def __init__(s, kod, yer=None): s.status_code, s.headers = kod, ({"Location": yer} if yer else {})
+YON = {"https://www.firsatl.ar/go/B0842N63DF":
+           Yanit(302, "https://www.amazon.com.tr/dp/B0842N63DF?tag=grup-21&linkCode=ogi&th=1&psc=1&utm_source=firsatlar"),
+       "https://amzn.eu/d/abc": Yanit(301, "https://www.amazon.com.tr/Sylvanian-Families/dp/B0842N63DF/ref=cm_sw?tag=x-21"),
+       "https://bit.ly/zincir": Yanit(302, "https://amzn.eu/d/abc"),
+       "https://kisa.link/goreli": Yanit(302, "/go/B0842N63DF"),
+       "https://kisa.link/go/B0842N63DF": Yanit(302, "https://www.amazon.com.tr/gp/product/B0842N63DF?smid=X"),
+       "https://kisa.link/hb": Yanit(302, "https://www.hepsiburada.com/urun-p-HB123"),
+       "https://kisa.link/sayfa": Yanit(200), "https://kisa.link/de": Yanit(302, "https://www.amazon.de/dp/B0842N63DF"),
+       "https://kisa.link/dongu": Yanit(302, "https://kisa.link/dongu")}
+istekler = []
+def sahte_get(url, allow_redirects=True, timeout=None):
+    assert allow_redirects is False and timeout
+    istekler.append(url)
+    if url == "https://kisa.link/hata": raise OSError("bağlantı yok")
+    return YON[url]
+D = lambda u: takip.duz_amazon_linki(u, sahte_get)
+DUZ = "https://www.amazon.com.tr/dp/B0842N63DF"
+assert D("https://www.firsatl.ar/go/B0842N63DF") == DUZ and istekler == ["https://www.firsatl.ar/go/B0842N63DF"]
+assert D("https://amzn.eu/d/abc") == DUZ and D("https://bit.ly/zincir") == DUZ and D("https://kisa.link/goreli") == DUZ
+istekler.clear()
+assert D("https://www.amazon.com.tr/Bir-Urun/dp/B0842N63DF/ref=x?tag=y-21&psc=1") == DUZ and not istekler   # istek yok
+assert D("https://www.amazon.com.tr/s?k=lego") is None and not istekler                        # ürün linki değil
+for u in ("https://kisa.link/hb", "https://kisa.link/sayfa", "https://kisa.link/de", "https://kisa.link/hata"):
+    assert D(u) is None, u
+istekler.clear(); assert D("https://kisa.link/dongu") is None and len(istekler) == 4             # en çok 4 adım
+istekler.clear(); assert D("https://t.me/ozelfirsat") is None and D("tg://x") is None and not istekler
+assert takip.duz_amazon_linki("https://www.firsatl.ar/go/B0842N63DF") is None                   # get yoksa istek yok
+# mesajdaki linklerden Amazon'a gideni bulunur (t.me ve Amazon'a gitmeyenler atlanır, en çok 3 link)
+t.link_oturumu = types.SimpleNamespace(get=sahte_get); istekler.clear()
+assert t.duz_link(["https://t.me/ozelfirsat", "https://kisa.link/hb", "https://www.firsatl.ar/go/B0842N63DF"]) == DUZ
+assert t.duz_link(["https://kisa.link/hb", "https://kisa.link/sayfa", "https://kisa.link/de",
+                   "https://www.firsatl.ar/go/B0842N63DF"]) is None                              # 4. linke bakılmaz
+assert t.duz_link(["https://kisa.link/sayfa", "https://amzn.eu/d/abc"]) == DUZ and istekler[-1] == "https://amzn.eu/d/abc"
+# uçtan uca: 'FIRSATA GİT' gizli linki düz Amazon linki olur; aynı ürün başka gruptan başka kısa linkle gelirse tekrar çalmaz
+class Olay2(Olay):
+    def __init__(s, chat_id, metin, linkler, id=78):
+        super().__init__(chat_id, metin, id)
+        s.message = types.SimpleNamespace(entities=[types.SimpleNamespace(url=l) for l in linkler])
+ha.clear(); msj.clear()
+asyncio.run_coroutine_threadsafe(isle(Olay2(-1001, "📦 Depo iPhone kılıf 8.503 TL\n👉 FIRSATA GİT\nGOOGLE",
+                                            ["https://www.firsatl.ar/go/B0842N63DF", "https://kisa.link/sayfa"])), g2.loop).result(3)
+assert ha and ha[-1][2] == DUZ and f'<a href="{DUZ}">Ürüne git</a>' in msj[-1] and "firsatl.ar" not in msj[-1], (ha, msj)
+asyncio.run_coroutine_threadsafe(isle(Olay2(-1002, "iPhone depo kılıfı 8.503 TL", ["https://bit.ly/zincir"], id=5)), g2.loop).result(3)
+assert len(ha) == 1                                                                            # aynı fırsat
+# çözülemeyen link: eskisi gibi olduğu gibi gösterilir
+asyncio.run_coroutine_threadsafe(isle(Olay2(-1001, "iphone depo başka", ["https://kisa.link/hb"], id=79)), g2.loop).result(3)
+assert len(ha) == 2 and ha[-1][2] == "https://kisa.link/hb"
 assert "Dinleme bırakıldı: Fırsat Avcıları" in g2.komut("/grupsil", ["/grupsil", "1"])
 
 # eksik telefon: kod istemeden durur

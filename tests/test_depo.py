@@ -35,7 +35,7 @@ assert t == [{"durum": "Yeni", "fiyat": 6999.0, "satici": "Amazon.com.tr", "gond
               "gonderen": "Amazon Lojistik", "yorum": "Ürün orijinal ambalajında gönderilir.", "onceki": None}], t
 oz = takip.depo_ozet(t)
 assert oz["depo"]["fiyat"] == 6532.69 and oz["yeni"] == 6999 and oz["onceki"] == 12168
-assert takip.depo_ozet([]) == {"depo": None, "yeni": None, "onceki": None}
+assert takip.depo_ozet([]) == {"depo": None, "yeni": None, "amazon": None, "onceki": None}
 D = takip.durum_derecesi
 assert D("Yeni") == 5 and D("İkinci El - Yeni Gibi") == 4 and D("İkinci El - Çok İyi") == 3
 assert D("İkinci El - İyi") == 2 and D("İkinci El - Kabul Edilebilir") == 1 and D("??") == 0
@@ -95,7 +95,7 @@ assert istek == [U, takip.AOD_URL.format("B0HJWZZVDB")], istek
 print(msj[-1])
 assert len(msj) == 1 and "🆕 Yeni çıktı" in msj[0] and "Inissia D40" in msj[0]
 assert "Fiyat: <b>6.532,69 TL</b>" in msj[0] and "İkinci El - Yeni Gibi · Satıcı: Amazon Depo" in msj[0]
-assert "Sıfırı 6.999,00 TL (%7 daha ucuz)" in msj[0] and "Önceki fiyat 12.168,00 TL (%46 altında)" in msj[0]
+assert "Amazon.com.tr sıfırı 6.999,00 TL (%7 daha ucuz)" in msj[0] and "Önceki fiyat 12.168,00 TL (%46 altında)" in msj[0]
 assert "<i>Ürün orijinal ambalajında gönderilir.</i>" in msj[0] and "bu satıcının" not in msj[0]
 assert 'href="https://www.amazon.com.tr/dp/B0HJWZZVDB?aod=1&condition=used"' in msj[0]
 istek.clear(); t.izleme_calistir(iz); assert istek == [U] and len(msj) == 1      # tekrar bildirilmez
@@ -155,8 +155,8 @@ assert "sıfır fiyatından (sıfırı yoksa önceki fiyatından) %30" in c
 # Diğerleri sıfırına göre %7 ucuz (eşik altında). Inissia %43 ucuz -> ilk taramada hemen bildirilir.
 assert [u for u in istek if "aodAjaxMain" in u] == [takip.AOD_URL.format("B0HJWZZVDB")], istek
 print(msj[-1])
-assert len(msj) == 1 and "🔥 Sıfırından %43 ucuz" in msj[0] and "Fiyat: <b>4.000,00 TL</b>" in msj[0]
-assert "Sıfırı 6.999,00 TL (%43 daha ucuz)" in msj[0] and "Önceki fiyat 12.168,00 TL (%67 altında)" in msj[0]
+assert len(msj) == 1 and "🔥 Amazon.com.tr fiyatından %43 ucuz" in msj[0] and "Fiyat: <b>4.000,00 TL</b>" in msj[0]
+assert "Amazon.com.tr sıfırı 6.999,00 TL (%43 daha ucuz)" in msj[0] and "Önceki fiyat 12.168,00 TL (%67 altında)" in msj[0]
 assert ha and ha[-1][2].endswith("B0HJWZZVDB?aod=1&condition=used") and "listede en düşük" not in msj[0]
 # kart fiyatı değişmedi: panel önbellekten okunur, yeniden bildirilmez
 istek.clear(); t.izleme_calistir(iz2)

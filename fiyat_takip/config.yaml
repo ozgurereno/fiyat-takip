@@ -1,6 +1,6 @@
 name: "Amazon Fiyat Takip"
 description: "amazon.com.tr ürün fiyatlarını izler, fiyat düşünce Telegram'dan bildirir"
-version: "1.8.0"
+version: "1.9.0"
 slug: "fiyat_takip"
 init: false
 arch:

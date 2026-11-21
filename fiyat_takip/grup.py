@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 log = logging.getLogger("grup")
+KANAL_TEKRAR = 600   # aynı Depo ürünü bu kadar saniye içinde tekrar gelirse yeniden doğrulanmaz
 
 FIYAT_RE = re.compile(r"(?:₺\s*([\d.,]+))|(?:([\d][\d.,]*)\s*(?:tl|₺|try)\b)", re.I)
 URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
@@ -211,27 +212,65 @@ class GrupDinleyici:
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(zaman)
 
     # ------------------------------------------------------------ mesajlar
-    async def _mesaj(self, olay):
-        if olay.chat_id not in {g["id"] for g in self.ayarlar["gruplar"]}:
-            return
-        metin = olay.raw_text or ""
-        kural = self.eslesen_kural(metin)
-        if not kural:
-            return
-        linkler = URL_RE.findall(metin)
-        for ent in getattr(olay.message, "entities", None) or []:
-            if getattr(ent, "url", None):
-                linkler.append(ent.url)
-        urun_link = next((l for l in linkler if re.search(r"amazon\.|amzn\.", l)), None) or \
-            (linkler[0] if linkler else None)
+    async def _duz_link(self, linkler):
+        if not (linkler and hasattr(self.t, "duz_link")):
+            return None
+        try:   # kısaltıcı / fırsat sitesi linkini düz Amazon linkine çevir
+            return await asyncio.to_thread(self.t.duz_link, linkler)
+        except Exception as e:
+            log.warning("ürün linki çözülemedi: %s", e)
+            return None
+
+    @staticmethod
+    async def _kaynak(olay):
         sohbet = await olay.get_chat()
         kullanici = getattr(sohbet, "username", None)
         if kullanici:
             mesaj_link = f"https://t.me/{kullanici}/{olay.id}"
         else:
             mesaj_link = f"https://t.me/c/{str(olay.chat_id).removeprefix('-100')}/{olay.id}"
-        grup_adi = getattr(sohbet, "title", None) or str(olay.chat_id)
+        return getattr(sohbet, "title", None) or str(olay.chat_id), mesaj_link
+
+    async def _mesaj(self, olay):
+        grup = next((g for g in self.ayarlar["gruplar"] if g["id"] == olay.chat_id), None)
+        if not grup:
+            return
+        metin = olay.raw_text or ""
+        linkler = URL_RE.findall(metin)
+        for ent in getattr(olay.message, "entities", None) or []:
+            if getattr(ent, "url", None):
+                linkler.append(ent.url)
+        duz = None
+        if grup.get("depo") is not None and linkler and hasattr(self.t, "kanal_depo"):
+            ka = grup["depo"]
+            if not ka.get("kelimeler") or any(all(kelime_gecer(w, normalle(metin)) for w in k.split())
+                                              for k in ka["kelimeler"]):
+                duz = await self._duz_link(linkler)
+                if duz:
+                    await self._depo_paylasimi(olay, ka, metin, duz)
+                    return   # Amazon ürünü: kararı Depo doğrulaması verdi
+        kural = self.eslesen_kural(metin)
+        if not kural:
+            return
+        urun_link = duz or await self._duz_link(linkler)
+        urun_link = urun_link or next((l for l in linkler if re.search(r"amazon\.|amzn\.", l)), None) or \
+            (linkler[0] if linkler else None)
+        grup_adi, mesaj_link = await self._kaynak(olay)
         await asyncio.to_thread(self.alarm, grup_adi, metin, kural, urun_link, mesaj_link)
+
+    async def _depo_paylasimi(self, olay, ka, metin, link):
+        asin = link.rstrip("/").rsplit("/", 1)[-1]
+        simdi = time.time()
+        self.son_depo = {k: v for k, v in getattr(self, "son_depo", {}).items() if simdi - v < KANAL_TEKRAR}
+        if asin in self.son_depo:
+            return   # aynı ürün az önce başka kanaldan / düzenlemeyle geldi
+        self.son_depo[asin] = simdi
+        sonuc, p = await asyncio.to_thread(self.t.kanal_depo, ka, asin)
+        if sonuc not in ("uygun", "okunamadi"):
+            log.info("Depo paylaşımı %s geçildi: %s", asin, sonuc)
+            return
+        grup_adi, mesaj_link = await self._kaynak(olay)
+        await asyncio.to_thread(self.depo_alarm, grup_adi, metin, ka, sonuc, p, link, mesaj_link)
 
     def alarm(self, grup_adi, metin, kural, urun_link, mesaj_link):
         anahtar = hashlib.sha1(normalle(urun_link or metin[:300]).encode()).hexdigest()
@@ -257,9 +296,39 @@ class GrupDinleyici:
                       f"{html.escape(metin[:700])}\n\n" + " · ".join(linkler) + not_)
         return True
 
+    def depo_alarm(self, grup_adi, metin, ka, sonuc, p, link, mesaj_link):
+        """Doğrulanan (ya da doğrulanamayan) Depo paylaşımını bildirir."""
+        linkler = f'<a href="{html.escape(link)}">Ürüne git</a> · <a href="{html.escape(mesaj_link)}">Mesaja git</a>'
+        ilk_satir = (metin.strip().split("\n") or [""])[0][:120]
+        if sonuc == "okunamadi":
+            if ka.get("esik") or ka.get("durum"):   # kurallar uygulanamadı: sesli uyarı yok
+                return self.t.bildir(f"⚠️ <b>Depo paylaşımı doğrulanamadı</b> · {html.escape(grup_adi)}\n"
+                                     "Amazon'dan okunamadığı için kurallarınız uygulanamadı.\n\n"
+                                     f"{html.escape(metin[:500])}\n\n{linkler}")
+            baslik, ad, sesli = "📦 Depo paylaşımı", ilk_satir, "Amazon'dan doğrulanamadı"
+            ayrinti = f"{html.escape(metin[:500])}\n<i>Amazon'dan doğrulanamadı.</i>"
+        else:
+            t = p["depo"]
+            baslik = f"🔥 {p['ref_ad']} %{p['oran']:.0f} ucuz" if p.get("oran") else "📦 Depo'da satışta"
+            ad = p.get("baslik") or ilk_satir
+            detay = self.t.depo_metin({"fiyat": t["fiyat"]}, p)
+            sesli = re.sub(r"<[^>]+>", "", detay.split("\n")[0]) + (f" · {t['durum']}" if t["durum"] else "")
+            ayrinti = f'<a href="{html.escape(link)}">{html.escape(ad[:90])}</a>\n{detay}'
+        log.info("Depo alarmı: %s / %s", grup_adi, ad[:60])
+        not_ = ""
+        try:
+            self.t.kritik_uyari(baslik, f"{ad[:80]}\n{sesli}", link)
+        except Exception as e:
+            log.warning("kritik uyarı gönderilemedi: %s", e)
+            not_ = f"\n⚠️ Sesli uyarı gönderilemedi: {html.escape(str(e))}"
+        return self.t.bildir(f"<b>{html.escape(baslik)}</b> · {html.escape(grup_adi)}\n{ayrinti}\n\n{linkler}{not_}")
+
     # ------------------------------------------------------------ komutlar
     def ozet(self):
-        g = "\n".join(f"{i}. {html.escape(x['ad'])}" for i, x in enumerate(self.ayarlar["gruplar"], 1))
+        g = "\n".join(f"{i}. {html.escape(x['ad'])}" + (
+            f" · {html.escape(self.t.depo_kurali_metni(x['depo']))}"
+            if x.get("depo") is not None and hasattr(self.t, "depo_kurali_metni") else "")
+            for i, x in enumerate(self.ayarlar["gruplar"], 1))
         k = "\n".join(f"{i}. {html.escape(self.kural_metni(x))}"
                       for i, x in enumerate(self.ayarlar["kurallar"], 1))
         return (f"Durum: {self.durum}\n\n<b>Dinlenen gruplar</b>\n{g or 'yok – /gruplar ile seçin'}\n\n"

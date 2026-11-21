@@ -118,7 +118,7 @@ s1 = arama([kart("A000000001", "Duragraph Dolma Kalem", "2.000,00 TL"), kart("A0
            '<a class="s-pagination-next" href="/s?i=office-products&page=2">Sonraki</a>')
 s2 = arama([kart("A000000003", "Mark Twain", "6.000,00 TL")])
 ur, nx = takip.arama_coz(s1.text)
-assert [u["asin"] for u in ur] == ["A000000001", "A000000002"] and ur[0] == {"asin": "A000000001", "baslik": "Conklin Duragraph Dolma Kalem", "fiyat": 2000.0}
+assert [u["asin"] for u in ur] == ["A000000001", "A000000002"] and ur[0] == {"asin": "A000000001", "baslik": "Conklin Duragraph Dolma Kalem", "fiyat": 2000.0, "onceki": 9999.0}
 assert nx == "https://www.amazon.com.tr/s?i=office-products&page=2"
 takip.time.sleep = lambda x: None
 sira = []
